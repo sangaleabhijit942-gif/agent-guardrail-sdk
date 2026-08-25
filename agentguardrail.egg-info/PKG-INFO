@@ -1,0 +1,6 @@
+Metadata-Version: 2.4
+Name: agentguardrail
+Version: 0.1.0
+Summary: Client SDK for Agent Guardrail — cost tracking and kill-switch protection for AI agents.
+Requires-Python: >=3.9
+Requires-Dist: requests>=2.28
