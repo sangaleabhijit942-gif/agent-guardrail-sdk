@@ -3,23 +3,30 @@ import uuid
 
 
 class GuardrailKillSignal(Exception):
-    """Raised when Agent Guardrail signals that a workflow has exceeded its cost threshold."""
+    """Raised when Agent Guardrail signals that a workflow has exceeded its cost threshold,
+    or when the guardrail service itself becomes unreachable and can no longer verify safety."""
     pass
 
 
 class GuardrailClient:
-    def __init__(self, api_key: str, workflow_name: str, base_url: str = "http://localhost:8000", timeout: int = 5):
+    def __init__(self, api_key: str, workflow_name: str, base_url: str = "http://localhost:8000", timeout: int = 5, max_consecutive_failures: int = 3):
         self.api_key = api_key
         self.workflow_name = workflow_name
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
         self.trace_id = str(uuid.uuid4())
+        self.max_consecutive_failures = max_consecutive_failures
+        self._consecutive_failures = 0
 
     def track(self, node_name: str, step: int, message: str, tokens_in: int = 0, tokens_out: int = 0) -> None:
         """
         Report a step's cost to Agent Guardrail. Raises GuardrailKillSignal if this
         pushes the workflow over its configured threshold — callers should let this
         exception propagate up and stop their own execution loop.
+
+        If the guardrail service becomes unreachable for several calls in a row,
+        this also raises GuardrailKillSignal — a workflow that can no longer be
+        monitored should not keep running unmonitored.
         """
         try:
             response = requests.post(
@@ -37,8 +44,15 @@ class GuardrailClient:
                 timeout=self.timeout
             )
             result = response.json()
+            self._consecutive_failures = 0
         except requests.exceptions.RequestException as e:
-            print(f"[agentguardrail] WARNING: failed to report event: {e}")
+            self._consecutive_failures += 1
+            print(f"[agentguardrail] WARNING: failed to report event ({self._consecutive_failures}/{self.max_consecutive_failures} consecutive failures): {e}")
+            if self._consecutive_failures >= self.max_consecutive_failures:
+                raise GuardrailKillSignal(
+                    f"Guardrail service unreachable for {self._consecutive_failures} consecutive calls — "
+                    f"stopping workflow, as cost can no longer be verified."
+                )
             return
 
         if result.get("status") == "kill":
