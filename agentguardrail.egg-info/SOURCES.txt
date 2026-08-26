@@ -1,8 +1,0 @@
-pyproject.toml
-agentguardrail/__init__.py
-agentguardrail/client.py
-agentguardrail.egg-info/PKG-INFO
-agentguardrail.egg-info/SOURCES.txt
-agentguardrail.egg-info/dependency_links.txt
-agentguardrail.egg-info/requires.txt
-agentguardrail.egg-info/top_level.txt
