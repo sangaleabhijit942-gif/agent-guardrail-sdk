@@ -44,16 +44,13 @@ class GuardrailClient:
                 timeout=self.timeout
             )
             result = response.json()
-            self._consecutive_failures = 0
-        except requests.exceptions.RequestException as e:
-            self._consecutive_failures += 1
-            print(f"[agentguardrail] WARNING: failed to report event ({self._consecutive_failures}/{self.max_consecutive_failures} consecutive failures): {e}")
-            if self._consecutive_failures >= self.max_consecutive_failures:
-                raise GuardrailKillSignal(
-                    f"Guardrail service unreachable for {self._consecutive_failures} consecutive calls — "
-                    f"stopping workflow, as cost can no longer be verified."
-                )
-            return
+self._consecutive_failures = 0
+except requests.exceptions.RequestException as e:
+    self._consecutive_failures += 1
+    print(f"[agentguardrail] WARNING: failed to report event ({self._consecutive_failures}/{self.max_consecutive_failures}...")
+    if self._consecutive_failures >= self.max_consecutive_failures:
+        raise GuardrailKillSignal(...)
+    return
 
         if result.get("status") == "kill":
             raise GuardrailKillSignal(result.get("reason", "Cost threshold exceeded"))
