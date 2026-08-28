@@ -1,6 +1,7 @@
 import requests
 import uuid
 import threading
+import time
 
 
 class GuardrailKillSignal(Exception):
@@ -22,7 +23,8 @@ class GuardrailClient:
         workflow_name: str,
         base_url: str = "http://localhost:8000",
         timeout: int = 5,
-        max_consecutive_failures: int = 3
+        max_consecutive_failures: int = 3,
+        sync_interval_seconds: int = 5
     ):
         self.api_key = api_key
         self.workflow_name = workflow_name
@@ -38,6 +40,10 @@ class GuardrailClient:
         self._cached_threshold = None
         self._cached_threshold_type = "cost"
         self._lock = threading.Lock()
+
+        self._sync_interval = sync_interval_seconds
+        self._sync_thread = None
+        self._stop_sync = threading.Event()
 
     def track(self, node_name: str, step: int, message: str, tokens_in: int = 0, tokens_out: int = 0) -> None:
         try:
@@ -71,14 +77,49 @@ class GuardrailClient:
         if result.get("status") == "kill":
             raise GuardrailKillSignal(result.get("reason", "Threshold exceeded"))
 
+    def _sync_threshold(self) -> None:
+        """
+        Fetches the current threshold for this workflow from the server.
+        Runs in a background thread — never blocks the customer's main code.
+        """
+        try:
+            response = requests.get(
+                f"{self.base_url}/threshold-lookup",
+                params={"workflow_name": self.workflow_name},
+                headers={"X-API-Key": self.api_key},
+                timeout=self.timeout
+            )
+            if response.status_code == 200:
+                data = response.json()
+                with self._lock:
+                    self._cached_threshold = data.get("threshold")
+                    self._cached_threshold_type = data.get("threshold_type", "cost")
+        except requests.exceptions.RequestException as e:
+            print(f"[agentguardrail] WARNING: background threshold sync failed: {e}")
+
+    def _sync_loop(self) -> None:
+        while not self._stop_sync.is_set():
+            self._sync_threshold()
+            self._stop_sync.wait(self._sync_interval)
+
+    def start_background_sync(self) -> None:
+        """
+        Starts a background daemon thread that periodically refreshes the local
+        threshold cache. Call this once, right after creating the client, if you
+        plan to use patch_anthropic(). Does an immediate sync before returning,
+        so the cache isn't empty for the very first call.
+        """
+        self._sync_threshold()  # immediate first sync, blocking, so cache is warm
+        self._sync_thread = threading.Thread(target=self._sync_loop, daemon=True)
+        self._sync_thread.start()
+
+    def stop_background_sync(self) -> None:
+        self._stop_sync.set()
+
     def _check_local_budget(self) -> None:
-        """
-        Called by patch_anthropic() BEFORE each outbound LLM call.
-        Blocks locally, with no network round-trip, if the cached budget is exceeded.
-        """
         with self._lock:
             if self._cached_threshold is None:
-                return  # No threshold synced yet — allow the call, first sync will populate this
+                return
 
             if self._cached_threshold_type == "cost":
                 if self._local_cost >= self._cached_threshold:
@@ -86,6 +127,13 @@ class GuardrailClient:
                         f"[agentguardrail] Call blocked BEFORE reaching the LLM provider — "
                         f"local cost cache (${self._local_cost:.6f}) has reached the threshold "
                         f"(${self._cached_threshold:.6f}). No API call was made."
+                    )
+            elif self._cached_threshold_type == "tokens":
+                if self._local_tokens >= self._cached_threshold:
+                    raise BudgetExceededError(
+                        f"[agentguardrail] Call blocked BEFORE reaching the LLM provider — "
+                        f"local token cache ({self._local_tokens}) has reached the threshold "
+                        f"({self._cached_threshold}). No API call was made."
                     )
 
     def _record_local_usage(self, tokens_in: int, tokens_out: int) -> None:
@@ -99,10 +147,12 @@ class GuardrailClient:
         messages.create() call is checked against the local budget cache
         BEFORE the request is sent to Anthropic's servers.
 
+        Call start_background_sync() first, so the threshold cache is populated.
+
         Usage:
             client = anthropic.Anthropic(api_key=...)
+            guardrail.start_background_sync()
             guardrail.patch_anthropic(client)
-            # client.messages.create(...) now blocks locally if over budget
         """
         original_create = client.messages.create
         guardrail_ref = self
