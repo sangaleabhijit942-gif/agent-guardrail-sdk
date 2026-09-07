@@ -1,7 +1,6 @@
 import requests
 import uuid
 import threading
-import time
 
 
 class GuardrailKillSignal(Exception):
@@ -117,6 +116,12 @@ class GuardrailClient:
         self._stop_sync.set()
 
     def _check_local_budget(self) -> None:
+        """
+        Real fix: previously only checked cost-type thresholds — a token-type
+        threshold was silently never enforced by patch_anthropic(), meaning
+        Mode B fell back to relying entirely on track()'s after-the-fact kill.
+        Found during real testing against a token-threshold fault injector.
+        """
         with self._lock:
             if self._cached_threshold is None:
                 return
